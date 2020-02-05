@@ -31,6 +31,10 @@ extern "C" {
 #include "callstack_instr/callstack_instr.h"
 #include "callstack_instr/callstack_instr_ext.h"
 
+
+#include "osi/osi_types.h"
+#include "osi/osi_ext.h"
+
 #include <map>
 #include <set>
 
@@ -59,6 +63,51 @@ std::map<uint64_t,std::set<uint64_t>> tainted_instr;
 target_ulong last_asid = 0;
 target_ulong last_pc = 0;
 
+Addr make_maddr(uint64_t a) {
+  Addr ma;
+  ma.typ = MADDR;
+  ma.val.ma = a;
+  ma.off = 0;
+  ma.flag = (AddrFlag) 0;
+  return ma;
+}
+
+void before_virt_read(CPUState *env, target_ptr_t pc, target_ptr_t addr,
+                     size_t size) {
+    hwaddr ma = panda_virt_to_phys(env, addr);
+
+    uint32_t num_tainted = 0;
+    //printf("ma: %x, addr: %x, size: %d\n", (unsigned int)ma, (unsigned int)addr, (unsigned int)size);
+    for (uint32_t i=0; i<size; i++) {
+        //printf("ma: %x, addr: %x\n", (unsigned int)ma, (unsigned int)addr + i);
+        /*
+
+static LabelSetP tp_labelset_get(const Addr &a) {
+    assert(shadow);
+    auto loc = shadow->query_loc(a);
+    if(loc.first == (void *)0x10){
+        return nullptr;
+    }
+    auto e0 = loc.first;
+    auto e1 = loc.second;
+    auto e2 = loc.first->query(e1);
+    return e0 ? e2 : nullptr;
+}
+
+        */
+        num_tainted += (taint2_query_ram(ma + i) != 0);
+        
+    }
+
+    if (0 < num_tainted){
+        OsiProc *current_proc = get_current_process(env);
+        target_ulong pid = current_proc->pid;
+        printf("tainted addr: %x, refrenced by pid: %d\n", (unsigned int)addr, (unsigned int)pid);
+    }
+    return;
+}
+
+
 void taint_change(Addr a, uint64_t size) {
     if (replay_ended) return;
     if (!replay_ended 
@@ -73,12 +122,23 @@ void taint_change(Addr a, uint64_t size) {
     CPUState *env = first_cpu; // cpu_single_env;
     target_ulong asid = panda_current_asid(env);
     target_ulong pc = panda_current_pc(env);
+    OsiProc *current_proc = get_current_process(env);
+    target_ulong pid = current_proc->pid;
+    uint64_t ma = a.val.ma;
+    
     uint32_t num_tainted = 0;
     for (uint32_t i=0; i<size; i++) {
         a.off = i;
         num_tainted += (taint2_query(a) != 0);
     }
-    if (num_tainted > 0) {            
+    if (num_tainted > 0) {
+        if(a.typ == MADDR){
+            printf("ma: 0x%x, pid: %d\n", (unsigned int)ma, (unsigned int)pid);
+        }
+
+        last_asid = asid;
+        last_pc = pc;
+        /*    
         if (summary) {
             tainted_instr[asid].insert(pc);
         }
@@ -133,6 +193,8 @@ void taint_change(Addr a, uint64_t size) {
         // really was tainted
         last_asid = asid;
         last_pc = pc;
+        */
+
     }
 }
 
@@ -141,11 +203,24 @@ bool init_plugin(void *self) {
     assert(init_taint2_api());
     panda_require("callstack_instr");
     assert (init_callstack_instr_api());
-    panda_arg_list *args = panda_get_args("tainted_instr");
-    summary = panda_parse_bool_opt(args, "summary", "summary tainted instruction info");
-    num_tainted_instr = panda_parse_uint64_opt(args, "num", 0, "number of tainted instructions to log or summarize");
-    if (summary) printf ("tainted_instr summary mode\n");
-    else printf ("tainted_instr full mode\n");
+    panda_require("osi");
+    assert(init_osi_api());
+
+    panda_enable_precise_pc();
+    panda_enable_memcb();
+
+    panda_arg_list *args = panda_get_args("tainted_memory");
+    summary = panda_parse_bool_opt(args, "summary", "summary tainted memory info");
+    num_tainted_instr = panda_parse_uint64_opt(args, "num", 0, "number of tainted memory to log or summarize");
+    if (summary) printf ("tainted_memory summary mode\n");
+    else printf ("tainted_memory full mode\n");
+
+    panda_cb pcb;    
+    pcb.virt_mem_before_read = before_virt_read;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_READ, pcb);
+    //pcb.virt_mem_before_write = mem_write_callback;
+    //panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_WRITE, pcb);
+
     PPP_REG_CB("taint2", on_taint_change, taint_change);
     // this tells taint system to enable extra instrumentation
     // so it can tell when the taint state changes
