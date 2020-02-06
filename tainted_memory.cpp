@@ -37,6 +37,7 @@ extern "C" {
 
 #include <map>
 #include <set>
+#include <iostream>
 
 // These need to be extern "C" so that the ABI is compatible with
 // QEMU/PANDA, which is written in C
@@ -49,16 +50,14 @@ void taint_change(void);
 }
 
 
-bool summary = false;
-uint64_t num_tainted_instr = 0;
-uint64_t num_tainted_instr_observed = 0;
-bool replay_ended = false;
+extern ram_addr_t ram_size;
 
 #include <map>
 #include <set>
 
-// map from asid -> pc
-std::map<uint64_t,std::set<uint64_t>> tainted_instr;
+// map from pid -> addr
+std::map<uint64_t,std::set<uint64_t>> tainted_memory_read;
+std::map<uint64_t,std::set<uint64_t>> tainted_memory_write;
 
 target_ulong last_asid = 0;
 target_ulong last_pc = 0;
@@ -72,131 +71,51 @@ Addr make_maddr(uint64_t a) {
   return ma;
 }
 
-void before_virt_read(CPUState *env, target_ptr_t pc, target_ptr_t addr,
-                     size_t size) {
+void before_virt_ops(CPUState *env, target_ptr_t addr,
+                     size_t size, std::map<uint64_t,std::set<uint64_t>>  & tainted_memory_map)
+{
+    if (!taint2_enabled()){
+        return;
+    }
     hwaddr ma = panda_virt_to_phys(env, addr);
 
     uint32_t num_tainted = 0;
-    //printf("ma: %x, addr: %x, size: %d\n", (unsigned int)ma, (unsigned int)addr, (unsigned int)size);
     for (uint32_t i=0; i<size; i++) {
-        //printf("ma: %x, addr: %x\n", (unsigned int)ma, (unsigned int)addr + i);
-        /*
-
-static LabelSetP tp_labelset_get(const Addr &a) {
-    assert(shadow);
-    auto loc = shadow->query_loc(a);
-    if(loc.first == (void *)0x10){
-        return nullptr;
-    }
-    auto e0 = loc.first;
-    auto e1 = loc.second;
-    auto e2 = loc.first->query(e1);
-    return e0 ? e2 : nullptr;
-}
-
-        */
-        num_tainted += (taint2_query_ram(ma + i) != 0);
-        
+        uint64_t cur_ram = ma + i;
+        if(ram_size < cur_ram){
+            //-m 2048
+            continue;
+        }
+        num_tainted += (taint2_query_ram(cur_ram) != 0);
     }
 
     if (0 < num_tainted){
         OsiProc *current_proc = get_current_process(env);
         target_ulong pid = current_proc->pid;
-        printf("tainted addr: %x, refrenced by pid: %d\n", (unsigned int)addr, (unsigned int)pid);
+        //printf("tainted addr: %x, refrenced by pid: %d\n", (unsigned int)addr, (unsigned int)pid);
+        tainted_memory_map[pid].insert(addr);
     }
+    return;
+
+}
+
+void before_virt_read(CPUState *env, target_ptr_t pc, target_ptr_t addr,
+                     size_t size) {
+    //printf("[taint_memory]%x is reading %x\n", (unsigned int)pc, (unsigned int)addr);
+    before_virt_ops(env, addr, size, tainted_memory_read);
     return;
 }
 
 
-void taint_change(Addr a, uint64_t size) {
-    if (replay_ended) return;
-    if (!replay_ended 
-        && num_tainted_instr != 0 
-        && (num_tainted_instr_observed == num_tainted_instr)) {
-        // analysis complete
-        printf ("tainted_instr ending early -- seen enough\n");
-        panda_replay_end();
-        replay_ended = true;
-        return;
-    }
-    CPUState *env = first_cpu; // cpu_single_env;
-    target_ulong asid = panda_current_asid(env);
-    target_ulong pc = panda_current_pc(env);
-    OsiProc *current_proc = get_current_process(env);
-    target_ulong pid = current_proc->pid;
-    uint64_t ma = a.val.ma;
-    
-    uint32_t num_tainted = 0;
-    for (uint32_t i=0; i<size; i++) {
-        a.off = i;
-        num_tainted += (taint2_query(a) != 0);
-    }
-    if (num_tainted > 0) {
-        if(a.typ == MADDR){
-            printf("ma: 0x%x, pid: %d\n", (unsigned int)ma, (unsigned int)pid);
-        }
-
-        last_asid = asid;
-        last_pc = pc;
-        /*    
-        if (summary) {
-            tainted_instr[asid].insert(pc);
-        }
-        else {
-            if (pandalog) {
-                Panda__TaintedInstr *ti = (Panda__TaintedInstr *) malloc(sizeof(Panda__TaintedInstr));
-                *ti = PANDA__TAINTED_INSTR__INIT;
-                ti->call_stack = pandalog_callstack_create();
-                ti->n_taint_query = num_tainted;
-                ti->taint_query = (Panda__TaintQuery **) malloc (sizeof(Panda__TaintQuery *) * num_tainted);
-                uint32_t j = 0;
-                for (uint32_t i=0; i<size; i++) {
-                    a.off = i;
-                    if (taint2_query(a)) {
-                        ti->taint_query[j++] = taint2_query_pandalog(a, 0);
-                    }
-                }
-                Panda__LogEntry ple = PANDA__LOG_ENTRY__INIT;
-                ple.tainted_instr = ti;
-                if (pandalog) {
-                    pandalog_write_entry(&ple);
-                }
-                pandalog_callstack_free(ti->call_stack);
-                for (uint32_t i=0; i<num_tainted; i++) {
-                    pandalog_taint_query_free(ti->taint_query[i]);
-                }
-                free(ti);
-            }
-            else {
-                printf ("  pc = 0x%" PRIx64 "\n", (uint64_t) pc);
-            }
-        }
-        if (asid != last_asid) {
-            if (pandalog) {
-                Panda__LogEntry ple = PANDA__LOG_ENTRY__INIT;
-                ple.has_asid = 1;
-                ple.asid = asid;
-                if (pandalog) {
-                    pandalog_write_entry(&ple);
-                }
-            }
-            num_tainted_instr_observed++;
-        }
-        else if (pc != last_pc) {
-            num_tainted_instr_observed++;
-            if (0 == (num_tainted_instr_observed % 1000))
-                printf ("%" PRId64 " tainted instr observed\n", num_tainted_instr_observed);
-        }
-
-        // a taint delete on tainted data will cause a taint change event
-        // thus, do not say we've seen a tainted 'instruction' unless the data
-        // really was tainted
-        last_asid = asid;
-        last_pc = pc;
-        */
-
-    }
+void before_virt_write(CPUState *env, target_ptr_t pc, target_ptr_t addr, size_t size, uint8_t *buf) {
+    //printf("[taint_memory]%x is writing %x\n", (unsigned int)pc, (unsigned int)addr);
+    before_virt_ops(env, addr, size, tainted_memory_write);
+    return;
 }
+
+
+
+
 
 bool init_plugin(void *self) {
     panda_require("taint2");
@@ -209,26 +128,24 @@ bool init_plugin(void *self) {
     panda_enable_precise_pc();
     panda_enable_memcb();
 
-    panda_arg_list *args = panda_get_args("tainted_memory");
-    summary = panda_parse_bool_opt(args, "summary", "summary tainted memory info");
-    num_tainted_instr = panda_parse_uint64_opt(args, "num", 0, "number of tainted memory to log or summarize");
-    if (summary) printf ("tainted_memory summary mode\n");
-    else printf ("tainted_memory full mode\n");
+    //panda_arg_list *args = panda_get_args("tainted_memory");
+    //summary = panda_parse_bool_opt(args, "summary", "summary tainted memory info");
+    //num_tainted_instr = panda_parse_uint64_opt(args, "num", 0, "number of tainted memory to log or summarize");
+    //if (summary) printf ("tainted_memory summary mode\n");
+    puts("[tainted_memory]tainted_memory full mode");
 
     panda_cb pcb;    
     pcb.virt_mem_before_read = before_virt_read;
     panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_READ, pcb);
-    //pcb.virt_mem_before_write = mem_write_callback;
-    //panda_register_callback(self, PANDA_CB_VIRT_MEM_BEFORE_WRITE, pcb);
+    pcb.virt_mem_after_write = before_virt_write;
+    panda_register_callback(self, PANDA_CB_VIRT_MEM_AFTER_WRITE, pcb);
 
-    PPP_REG_CB("taint2", on_taint_change, taint_change);
-    // this tells taint system to enable extra instrumentation
-    // so it can tell when the taint state changes
     taint2_track_taint_state();
     return true;
 }
 
 void uninit_plugin(void *self) {
+    /*
     if (summary) {
         Panda__TaintedInstrSummary *tis = (Panda__TaintedInstrSummary *) malloc (sizeof (Panda__TaintedInstrSummary));
         for (auto kvp : tainted_instr) {
@@ -251,4 +168,19 @@ void uninit_plugin(void *self) {
         }
         free(tis);
     }
+    */
+   puts("[tainted_memory]on uninit\n");
+   for(auto cur_item: tainted_memory_read){
+       auto pid = cur_item.first;
+       for(auto addr: cur_item.second){
+           std::cout << pid << " reading "  << addr << std::hex<< std::endl;
+       }
+   }
+   for(auto cur_item: tainted_memory_write){
+       auto pid = cur_item.first;
+       for(auto addr: cur_item.second){
+           std::cout << pid << " writing "  << addr << std::hex << std::endl;
+       }
+   }
+   return;
 }
