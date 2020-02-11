@@ -1,5 +1,4 @@
 # tainted_memory
-a panda plugin
+A panda plugin-plugin of taint2, showing the tainted ram with virtual address
 ## TODO
-* fix address error
-* fix bug 
+* supporting plog

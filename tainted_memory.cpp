@@ -62,15 +62,6 @@ std::map<uint64_t,std::set<uint64_t>> tainted_memory_write;
 target_ulong last_asid = 0;
 target_ulong last_pc = 0;
 
-Addr make_maddr(uint64_t a) {
-  Addr ma;
-  ma.typ = MADDR;
-  ma.val.ma = a;
-  ma.off = 0;
-  ma.flag = (AddrFlag) 0;
-  return ma;
-}
-
 void before_virt_ops(CPUState *env, target_ptr_t addr,
                      size_t size, std::map<uint64_t,std::set<uint64_t>>  & tainted_memory_map)
 {

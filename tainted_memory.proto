@@ -9,6 +9,7 @@ message TaintedMemorySummary {
     required uint64 pc = 2;
     required uint64 pid = 3;
     required uint64 address = 4;
+    required uint64 rw = 5;
 }
    
     
